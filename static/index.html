@@ -1,0 +1,1459 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Research Agent</title>
+
+  <!-- Tailwind CSS Play CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            surface: '#0d1117',
+            card:    '#161b22',
+            border:  '#21262d',
+            accent:  '#58a6ff',
+            muted:   '#8b949e',
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Vue 3 -->
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+
+  <!-- Marked.js for Markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+    /* Pipeline connector lines */
+    .pipeline-node { position: relative; }
+    .pipeline-node:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      right: -18px; top: 50%;
+      width: 16px; height: 2px;
+      background: #30363d;
+      z-index: 0;
+    }
+    .pipeline-node.active::after { background: #58a6ff; }
+    .pipeline-node.done::after   { background: #2ea043; }
+
+    /* Pulsing active indicator */
+    @keyframes pulse-ring {
+      0%   { box-shadow: 0 0 0 0 rgba(88,166,255,0.5); }
+      70%  { box-shadow: 0 0 0 8px rgba(88,166,255,0);  }
+      100% { box-shadow: 0 0 0 0 rgba(88,166,255,0);    }
+    }
+    .pulse { animation: pulse-ring 1.4s ease-out infinite; }
+
+    /* Spinning loader */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 1s linear infinite; }
+
+    /* SVG node pulse (active node in topology) */
+    @keyframes svg-pulse {
+      0%, 100% { opacity: 0.2; }
+      50%       { opacity: 0.65; }
+    }
+    .svg-pulse { animation: svg-pulse 1.4s ease-in-out infinite; }
+
+    /* Confidence bar */
+    .conf-bar { transition: width 0.6s ease; }
+
+    /* SSE event log */
+    .log-entry { font-family: 'Fira Code', monospace; font-size: 11px; }
+
+    /* Card appear animation */
+    @keyframes slideIn {
+      from { opacity:0; transform: translateY(8px); }
+      to   { opacity:1; transform: translateY(0);    }
+    }
+    .slide-in { animation: slideIn 0.25s ease forwards; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #0d1117; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+    /* Report markdown */
+    .report-body h2  { font-size:1.1rem; font-weight:700; margin:1.2rem 0 0.4rem; color:#c9d1d9; }
+    .report-body p   { margin: 0.5rem 0; line-height: 1.7; color: #8b949e; }
+    .report-body a   { color: #58a6ff; text-decoration: none; }
+    .report-body a:hover { text-decoration: underline; }
+    .report-body ul  { list-style: disc; padding-left: 1.5rem; }
+    .report-body li  { margin: 0.25rem 0; color: #8b949e; }
+
+    /* Credibility dot colors */
+    .cred-high { color: #2ea043; }
+    .cred-mid  { color: #d29922; }
+    .cred-low  { color: #f85149; }
+
+    /* HITL modal backdrop */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
+      z-index: 50;
+      display: flex; align-items: center; justify-content: center;
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── HEADER ──────────────────────────────────────────────────────── -->
+  <header class="border-b border-border bg-card sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <!-- Brain icon -->
+        <svg class="w-7 h-7 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+        </svg>
+        <span class="text-lg font-semibold text-white">Research Agent</span>
+        <span class="text-xs text-muted px-2 py-0.5 rounded-full border border-border">LangGraph + OpenRouter</span>
+      </div>
+      <div class="flex items-center gap-4">
+        <!-- Status badge -->
+        <div v-if="status !== 'idle'" class="flex items-center gap-2">
+          <span :class="statusDotClass" class="w-2 h-2 rounded-full"></span>
+          <span class="text-sm text-muted">{{ statusLabel }}</span>
+        </div>
+        <!-- Cost badge -->
+        <div v-if="totalCost > 0" class="text-sm font-mono text-emerald-400">
+          ${{ totalCost.toFixed(4) }}
+        </div>
+        <!-- Thread ID -->
+        <div v-if="threadId" class="text-xs text-muted font-mono truncate max-w-40" :title="threadId">
+          {{ threadId.slice(-12) }}
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="max-w-7xl mx-auto px-6 py-6 space-y-6">
+
+    <!-- ── CONFIG PANEL ─────────────────────────────────────────────── -->
+    <div v-if="status === 'idle' || status === 'error'" class="slide-in">
+      <div class="bg-card border border-border rounded-xl p-6 space-y-5">
+        <h2 class="text-white font-semibold text-lg flex items-center gap-2">
+          <svg class="w-5 h-5 text-accent" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          New Research Run
+        </h2>
+
+        <!-- API Key input -->
+        <div>
+          <label class="block text-sm text-muted mb-2">
+            OpenRouter API Key
+            <span class="ml-2 text-xs text-emerald-400" v-if="form.openrouterKey">✓ saved</span>
+          </label>
+          <input
+            type="password"
+            v-model="form.openrouterKey"
+            placeholder="sk-or-v1-…"
+            autocomplete="off"
+            class="w-full bg-surface border border-border rounded-lg px-4 py-2.5 text-white placeholder-muted focus:outline-none focus:border-accent text-sm font-mono"
+          />
+          <p class="text-xs text-muted mt-1">Stored in browser only (localStorage). Never sent to any server other than OpenRouter.</p>
+        </div>
+
+        <!-- Question input -->
+        <div>
+          <label class="block text-sm text-muted mb-2">Research Question</label>
+          <textarea
+            v-model="form.question"
+            rows="3"
+            placeholder="e.g. What are the latest developments in fusion energy?"
+            class="w-full bg-surface border border-border rounded-lg px-4 py-3 text-white placeholder-muted resize-none focus:outline-none focus:border-accent text-sm"
+          ></textarea>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <!-- Budget -->
+          <div>
+            <label class="block text-sm text-muted mb-2">Budget (USD)</label>
+            <input type="number" v-model.number="form.budget" min="0.10" max="10" step="0.10"
+              class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-accent"/>
+          </div>
+          <!-- Max iterations -->
+          <div>
+            <label class="block text-sm text-muted mb-2">Max Iterations</label>
+            <input type="number" v-model.number="form.maxIters" min="1" max="10"
+              class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-accent"/>
+          </div>
+          <!-- Confidence threshold -->
+          <div>
+            <label class="block text-sm text-muted mb-2">Confidence Gate</label>
+            <input type="number" v-model.number="form.confidence" min="0.3" max="0.99" step="0.05"
+              class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-accent"/>
+          </div>
+          <!-- User ID -->
+          <div>
+            <label class="block text-sm text-muted mb-2">User ID</label>
+            <input type="text" v-model="form.userId"
+              class="w-full bg-surface border border-border rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-accent"/>
+          </div>
+        </div>
+
+        <!-- Autonomy level -->
+        <div>
+          <label class="block text-sm text-muted mb-3">Review Mode</label>
+          <div class="grid grid-cols-3 gap-3">
+            <label v-for="opt in autonomyOptions" :key="opt.value"
+              :class="form.autonomyLevel === opt.value
+                ? 'border-accent bg-accent/10 text-accent'
+                : 'border-border text-muted hover:border-muted'"
+              class="flex flex-col gap-1 border rounded-lg p-3 cursor-pointer transition-all">
+              <input type="radio" :value="opt.value" v-model.number="form.autonomyLevel" class="sr-only"/>
+              <span class="font-medium text-sm">{{ opt.label }}</span>
+              <span class="text-xs opacity-70">{{ opt.desc }}</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Error -->
+        <div v-if="error" class="text-red-400 text-sm bg-red-500/10 border border-red-500/30 rounded-lg px-4 py-3">
+          {{ error }}
+        </div>
+
+        <!-- Start button -->
+        <button @click="startResearch"
+          :disabled="!form.question.trim() || !form.openrouterKey.trim() || status === 'starting'"
+          class="w-full py-3 rounded-lg font-semibold text-sm transition-all
+                 bg-accent text-white hover:bg-blue-400 disabled:opacity-40 disabled:cursor-not-allowed">
+          <span v-if="status === 'starting'">Starting…</span>
+          <span v-else-if="!form.openrouterKey.trim()">Enter API key to start</span>
+          <span v-else>▶ Start Research</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ── PIPELINE VISUALIZER ──────────────────────────────────────── -->
+    <div v-if="status !== 'idle'" class="slide-in">
+      <div class="bg-card border border-border rounded-xl p-5">
+        <div class="flex items-center gap-1 overflow-x-auto pb-1">
+          <div v-for="(node, i) in pipeline" :key="node.id"
+            :class="['pipeline-node', node.status]"
+            class="flex flex-col items-center gap-1.5 flex-shrink-0 px-2">
+            <!-- Node circle -->
+            <div :class="[
+              'w-9 h-9 rounded-full border-2 flex items-center justify-center text-xs font-bold transition-all duration-500',
+              node.status === 'active' ? 'border-accent bg-accent/20 text-accent pulse' :
+              node.status === 'done'   ? 'border-emerald-500 bg-emerald-500/20 text-emerald-400' :
+              node.status === 'error'  ? 'border-red-500 bg-red-500/20 text-red-400' :
+              'border-border bg-surface text-muted'
+            ]">
+              <svg v-if="node.status === 'active'" class="w-4 h-4 spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              <svg v-else-if="node.status === 'done'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+              </svg>
+              <span v-else>{{ i + 1 }}</span>
+            </div>
+            <!-- Label -->
+            <span :class="[
+              'text-xs font-medium',
+              node.status === 'active' ? 'text-accent' :
+              node.status === 'done'   ? 'text-emerald-400' : 'text-muted'
+            ]">{{ node.label }}</span>
+            <!-- Iteration count badge -->
+            <span v-if="node.id === 'search_exec' && iterationCount > 0"
+              class="text-xs text-amber-400 font-mono">×{{ iterationCount }}</span>
+          </div>
+        </div>
+        <!-- Iteration info -->
+        <div v-if="iterationCount > 0" class="mt-3 pt-3 border-t border-border flex items-center gap-4 text-xs text-muted flex-wrap">
+          <span v-if="iterationCount <= form.maxIters">
+            Research cycle <strong class="text-white">{{ iterationCount }}/{{ form.maxIters }}</strong>
+          </span>
+          <span v-else>
+            Research cycle <strong class="text-white">{{ form.maxIters }}/{{ form.maxIters }}</strong>
+            + <strong class="text-amber-400">{{ iterationCount - form.maxIters }}</strong> HITL re-search
+          </span>
+          <span v-if="confidence > 0">
+            Critic conf <strong :class="confidence >= form.confidence ? 'text-emerald-400' : 'text-amber-400'">{{ (confidence * 100).toFixed(0) }}%</strong>
+            <span class="text-muted/50">(gate {{ (form.confidence * 100).toFixed(0) }}%)</span>
+          </span>
+          <span>Cost <strong class="text-white">${{ totalCost.toFixed(4) }}</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── LANGGRAPH EXECUTION PANEL ────────────────────────────────── -->
+    <div v-if="status !== 'idle' && graphTrace.length > 0" class="bg-card border border-border rounded-xl overflow-hidden slide-in">
+      <!-- Header + view tabs -->
+      <div class="flex items-center justify-between px-5 py-3 border-b border-border">
+        <h3 class="text-white font-semibold flex items-center gap-2 text-sm">
+          <svg class="w-4 h-4 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zm10 0a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"/>
+          </svg>
+          LangGraph Execution
+        </h3>
+        <div class="flex items-center gap-2">
+          <div class="flex gap-1 bg-surface rounded-lg p-0.5">
+            <button @click="graphView = 'trace'"
+              :class="graphView === 'trace' ? 'bg-card text-white' : 'text-muted hover:text-white'"
+              class="text-xs px-3 py-1 rounded-md transition-all">State Trace</button>
+            <button @click="graphView = 'topo'"
+              :class="graphView === 'topo' ? 'bg-card text-white' : 'text-muted hover:text-white'"
+              class="text-xs px-3 py-1 rounded-md transition-all">Topology</button>
+          </div>
+          <button @click="graphOpen = !graphOpen" class="text-muted hover:text-white transition-colors text-xs w-5">
+            {{ graphOpen ? '▾' : '▸' }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="graphOpen">
+
+        <!-- ── STATE TRACE ── -->
+        <div v-if="graphView === 'trace'" class="p-5 max-h-96 overflow-y-auto" ref="traceContainer">
+          <div v-for="(entry, i) in graphTrace" :key="entry.id">
+            <!-- Loop indicator -->
+            <div v-if="entry.type === 'loop'"
+              class="flex items-center gap-2 py-2 pl-4 text-amber-400 text-xs">
+              <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
+                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+              ↺ loop back to <strong class="ml-1">{{ entry.node }}</strong>
+              <span class="text-amber-400/40">— {{ entry.time }}</span>
+            </div>
+            <!-- Node entry -->
+            <div v-else class="flex items-start gap-3">
+              <div class="flex flex-col items-center flex-shrink-0 w-5">
+                <div :class="[
+                  'w-2.5 h-2.5 rounded-full mt-1 flex-shrink-0 transition-all',
+                  entry.node === 'publish'  ? 'bg-emerald-400' :
+                  entry.node === 'escalate' ? 'bg-red-500' :
+                  entry.delta              ? 'bg-emerald-500/70' :
+                  'bg-accent svg-pulse'
+                ]"></div>
+                <div v-if="i < graphTrace.length - 1"
+                  class="w-px flex-1 mt-1 mb-0.5 min-h-3"
+                  :class="entry.delta ? 'bg-border' : 'bg-accent/20'"></div>
+              </div>
+              <div class="pb-3 min-w-0 flex-1">
+                <div class="flex items-baseline gap-2">
+                  <code :class="[
+                    'text-sm font-semibold',
+                    entry.node === 'escalate' ? 'text-red-400' :
+                    entry.node === 'publish'  ? 'text-emerald-400' :
+                    'text-accent'
+                  ]">{{ entry.node }}</code>
+                  <span class="text-muted/50 text-xs">{{ entry.time }}</span>
+                </div>
+                <div v-if="entry.delta" class="text-xs text-muted mt-0.5">{{ formatDelta(entry.delta) }}</div>
+                <div v-else class="text-xs text-accent/40 mt-0.5 italic">running…</div>
+              </div>
+            </div>
+          </div>
+          <div v-if="graphTrace.length === 0" class="text-xs text-muted/50 text-center py-4">Waiting for first node…</div>
+        </div>
+
+        <!-- ── GRAPH TOPOLOGY ── -->
+        <div v-if="graphView === 'topo'" class="p-5">
+          <!-- Legend -->
+          <div class="flex flex-wrap items-center gap-4 text-xs text-muted mb-4 justify-center">
+            <span><span class="inline-block w-2.5 h-2.5 rounded-sm bg-[#143052] border border-[#58a6ff] mr-1"></span>running</span>
+            <span><span class="inline-block w-2.5 h-2.5 rounded-sm bg-[#0d2818] border border-[#2ea043] mr-1"></span>done</span>
+            <span><span class="inline-block w-2.5 h-2.5 rounded-sm bg-[#161b22] border border-[#21262d] mr-1"></span>pending</span>
+            <span><span class="inline-block w-6 border-t-2 border-amber-500 border-dashed mr-1 align-middle"></span>loop</span>
+            <span><span class="inline-block w-6 border-t-2 border-red-500 border-dashed mr-1 align-middle"></span>escalate</span>
+          </div>
+          <div class="flex justify-center overflow-auto">
+            <svg viewBox="0 0 480 640" style="width:100%;max-width:360px;height:auto">
+              <defs>
+                <marker id="ah" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+                  <path d="M1,1 L8,4.5 L1,8" fill="none" stroke="#374151" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </marker>
+                <marker id="ah-loop" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0.5 L7,4 L0,7.5 Z" fill="#d29922"/>
+                </marker>
+                <marker id="ah-esc" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+                  <path d="M0,0.5 L7,4 L0,7.5 Z" fill="#f85149"/>
+                </marker>
+              </defs>
+              <!-- START dot -->
+              <circle cx="240" cy="14" r="8" fill="#58a6ff"/>
+              <text x="240" y="18" text-anchor="middle" font-size="9" fill="white" font-weight="700">S</text>
+              <!-- Main flow edges -->
+              <line x1="240" y1="22" x2="240" y2="40" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <line x1="240" y1="64" x2="240" y2="112" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <line x1="240" y1="136" x2="240" y2="184" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <line x1="240" y1="208" x2="240" y2="244" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <line x1="240" y1="266" x2="240" y2="308" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <line x1="240" y1="332" x2="240" y2="380" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <line x1="240" y1="404" x2="240" y2="442" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <line x1="240" y1="464" x2="240" y2="504" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <!-- approve → publish (curve left) -->
+              <path d="M224,528 C224,556 120,552 120,570" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <!-- publish → END -->
+              <line x1="120" y1="588" x2="120" y2="606" stroke="#374151" stroke-width="1.5" marker-end="url(#ah)"/>
+              <!-- END dot -->
+              <circle cx="120" cy="620" r="8" fill="#2ea043"/>
+              <text x="120" y="624" text-anchor="middle" font-size="9" fill="white" font-weight="700">E</text>
+              <!-- Loop: more_research (critic left → search_plan left) -->
+              <path d="M196,320 C72,320 72,124 196,124"
+                fill="none" stroke="#d29922" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ah-loop)"/>
+              <text font-size="8" fill="#d29922" text-anchor="middle" transform="translate(57,222) rotate(-90)">more_research</text>
+              <!-- Loop: rejected (approve left → search_plan left) -->
+              <path d="M192,516 C38,516 38,124 192,124"
+                fill="none" stroke="#d29922" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ah-loop)"/>
+              <text font-size="8" fill="#d29922" text-anchor="middle" transform="translate(24,320) rotate(-90)">rejected</text>
+              <!-- Loop: needs_revision (approve right → draft right) -->
+              <path d="M284,516 C390,516 390,392 284,392"
+                fill="none" stroke="#d29922" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#ah-loop)"/>
+              <text font-size="8" fill="#d29922" text-anchor="middle" transform="translate(400,454) rotate(90)">needs_revision</text>
+              <!-- Escalate: critic right → escalate left -->
+              <path d="M283,320 C340,320 358,382 358,392"
+                fill="none" stroke="#f85149" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#ah-esc)"/>
+              <!-- Escalate: approve right → escalate bottom -->
+              <path d="M284,516 C432,516 432,404 440,404"
+                fill="none" stroke="#f85149" stroke-width="1" stroke-dasharray="4 3" marker-end="url(#ah-esc)"/>
+              <!-- Pulse aura for running node -->
+              <template v-for="node in TOPO_NODES" :key="'aura-'+node.id">
+                <rect v-if="topoNodeStatus(node.id) === 'running'"
+                  :x="node.cx - node.w/2 - 4" :y="node.cy - node.h/2 - 4"
+                  :width="node.w + 8" :height="node.h + 8"
+                  rx="10" fill="none" stroke="#58a6ff" stroke-width="2" class="svg-pulse"/>
+              </template>
+              <!-- Nodes -->
+              <g v-for="node in TOPO_NODES" :key="node.id">
+                <rect
+                  :x="node.cx - node.w/2" :y="node.cy - node.h/2"
+                  :width="node.w" :height="node.h" rx="7"
+                  :fill="topoNodeFill(node.id)" :stroke="topoNodeStroke(node.id)" stroke-width="1.5"/>
+                <text :x="node.cx" :y="node.cy + 4"
+                  text-anchor="middle" font-size="11"
+                  :fill="topoNodeTextFill(node.id)"
+                  font-family="ui-monospace, monospace">{{ node.label }}</text>
+              </g>
+            </svg>
+          </div>
+          <p class="text-xs text-muted/50 text-center mt-2">
+            Loop exits when critic confidence ≥ <strong class="text-white">{{ (form.confidence*100).toFixed(0) }}%</strong> or {{ form.maxIters }} cycles reached
+          </p>
+        </div>
+
+      </div><!-- /graphOpen -->
+    </div>
+
+    <!-- ── TWO-COLUMN GRID: INTENT + SEARCH PLAN ────────────────────── -->
+    <div v-if="intent || searchPlan" class="grid grid-cols-1 md:grid-cols-2 gap-4 slide-in">
+
+      <!-- Intent Card -->
+      <div v-if="intent" class="bg-card border border-border rounded-xl p-5 space-y-3">
+        <h3 class="text-white font-semibold flex items-center gap-2">
+          <svg class="w-4 h-4 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+          </svg>
+          Intent Classification
+        </h3>
+        <div class="space-y-2 text-sm">
+          <div class="flex items-start gap-2">
+            <span class="text-muted w-24 flex-shrink-0">Topic</span>
+            <span class="text-white font-medium">{{ intent.topic }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-muted w-24 flex-shrink-0">Task type</span>
+            <span class="px-2 py-0.5 rounded-full text-xs font-medium"
+              :class="intent.task_type === 'research' ? 'bg-accent/20 text-accent' : 'bg-violet-500/20 text-violet-400'">
+              {{ intent.task_type }}
+            </span>
+          </div>
+          <div class="flex items-start gap-2">
+            <span class="text-muted w-24 flex-shrink-0">Interpretation</span>
+            <span class="text-muted text-xs">{{ intent.disambiguation }}</span>
+          </div>
+          <!-- Confidence bar -->
+          <div>
+            <div class="flex justify-between text-xs mb-1">
+              <span class="text-muted">Confidence</span>
+              <span class="text-white">{{ (intent.confidence * 100).toFixed(0) }}%</span>
+            </div>
+            <div class="h-1.5 bg-surface rounded-full overflow-hidden">
+              <div class="h-full bg-violet-500 conf-bar" :style="{width: (intent.confidence * 100) + '%'}"></div>
+            </div>
+          </div>
+          <div v-if="intent.needs_clarification"
+            class="text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-3 py-2">
+            ⚠ Needs clarification: {{ intent.clarification_reason }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Search Plan Card -->
+      <div v-if="searchPlan" class="bg-card border border-border rounded-xl p-5 space-y-3">
+        <h3 class="text-white font-semibold flex items-center gap-2">
+          <svg class="w-4 h-4 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+          </svg>
+          Search Plan <span class="text-xs text-muted font-normal ml-1">({{ searchPlan.queries.length }} queries)</span>
+        </h3>
+        <div class="space-y-2">
+          <div v-for="(q, i) in searchPlan.queries" :key="i"
+            class="flex items-start gap-3 p-2.5 bg-surface rounded-lg">
+            <span :class="priorityColor(q.priority)"
+              class="text-xs font-bold w-6 h-6 rounded flex items-center justify-center flex-shrink-0 border">
+              P{{ q.priority }}
+            </span>
+            <div class="min-w-0">
+              <p class="text-white text-sm font-medium truncate">{{ q.query }}</p>
+              <p class="text-muted text-xs mt-0.5">{{ q.rationale }}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SEARCH RESULTS ───────────────────────────────────────────── -->
+    <div v-if="searchResults.length > 0" class="bg-card border border-border rounded-xl p-5 slide-in">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-white font-semibold flex items-center gap-2">
+          <svg class="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          Search Results
+          <span class="text-xs text-muted font-normal">({{ searchResults.length }} retrieved)</span>
+        </h3>
+        <button @click="showAllResults = !showAllResults"
+          class="text-xs text-accent hover:text-blue-300 transition-colors">
+          {{ showAllResults ? 'Show less' : 'Show all' }}
+        </button>
+      </div>
+      <div class="space-y-2 max-h-72 overflow-y-auto pr-1">
+        <div v-for="(r, i) in showAllResults ? searchResults : searchResults.slice(0, 6)" :key="i"
+          class="flex items-start gap-3 p-3 bg-surface rounded-lg hover:bg-border/30 transition-colors">
+          <!-- Credibility indicator -->
+          <div class="flex-shrink-0 mt-0.5">
+            <div :class="credClass(r.credibility_score)"
+              class="w-2 h-2 rounded-full mt-1"></div>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <a :href="r.url" target="_blank"
+                class="text-accent text-xs hover:underline truncate max-w-xs">
+                {{ domainOf(r.url) }}
+              </a>
+              <span class="text-xs text-muted font-mono">Cred: {{ r.credibility_score.toFixed(2) }}</span>
+              <span class="text-xs text-muted">·</span>
+              <span class="text-xs text-muted italic">{{ r.query.slice(0, 40) }}…</span>
+            </div>
+            <p class="text-muted text-xs mt-1 line-clamp-2">{{ r.content.slice(0, 150) }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── CRITIC EVALUATIONS ───────────────────────────────────────── -->
+    <div v-if="criticEvals.length > 0" class="bg-card border border-border rounded-xl p-5 slide-in">
+      <h3 class="text-white font-semibold flex items-center gap-2 mb-4">
+        <svg class="w-4 h-4 text-rose-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        Evidence Quality Gate
+      </h3>
+      <!-- Confidence explanation tooltip -->
+      <div class="relative group inline-block mb-4">
+        <button class="flex items-center gap-1 text-xs text-muted/60 hover:text-muted bg-surface border border-border rounded-full px-2 py-0.5">
+          <span>ℹ</span> Why does confidence fluctuate?
+        </button>
+        <div class="hidden group-hover:block absolute left-0 top-7 w-72 bg-card border border-border rounded-xl p-3 text-xs text-muted z-10 shadow-xl">
+          <p class="font-medium text-white mb-1.5">About critic confidence</p>
+          <p>Each iteration the critic independently re-evaluates <em>all</em> accumulated evidence. LLM scoring is non-deterministic — small context differences produce varying numbers.</p>
+          <p class="mt-1.5">Focus on the <strong class="text-white">trend</strong>; the loop exits when score ≥ threshold or the iteration cap is hit.</p>
+          <p class="mt-1.5 text-sky-300"><strong>Report confidence</strong> (shown in the Report panel) is a completely separate score: the synthesis agent estimates final draft quality. It is <em>not</em> the same as critic confidence.</p>
+        </div>
+      </div>
+
+      <!-- Tab selector for multiple iterations -->
+      <div v-if="criticEvals.length > 1" class="flex gap-2 mb-4 flex-wrap">
+        <button v-for="(ev, i) in criticEvals" :key="i"
+          @click="activeCriticTab = i"
+          :class="activeCriticTab === i
+            ? 'bg-accent/20 text-accent border-accent'
+            : 'text-muted border-border hover:border-muted'"
+          class="text-xs px-3 py-1 rounded-full border transition-all">
+          Iter {{ ev.iteration }}
+          <span :class="ev.verdict === 'approve' ? 'text-emerald-400' : 'text-amber-400'">
+            {{ ev.verdict === 'approve' ? '✓' : '↻' }}
+          </span>
+        </button>
+      </div>
+
+      <!-- Active critic eval -->
+      <div v-if="activeCriticEval" class="space-y-4">
+        <!-- Confidence gauge -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-sm text-muted">Evidence Confidence</span>
+            <div class="flex items-center gap-2">
+              <span class="text-xl font-bold"
+                :class="activeCriticEval.confidence >= form.confidence ? 'text-emerald-400' : 'text-amber-400'">
+                {{ (activeCriticEval.confidence * 100).toFixed(0) }}%
+              </span>
+              <span class="text-xs px-2 py-0.5 rounded-full"
+                :class="activeCriticEval.verdict === 'approve'
+                  ? 'bg-emerald-500/20 text-emerald-400'
+                  : 'bg-amber-500/20 text-amber-400'">
+                {{ activeCriticEval.verdict === 'approve' ? 'Approved → Draft' : 'More Research' }}
+              </span>
+            </div>
+          </div>
+          <div class="h-2 bg-surface rounded-full overflow-hidden">
+            <div :class="activeCriticEval.confidence >= form.confidence ? 'bg-emerald-500' : 'bg-amber-500'"
+              class="h-full conf-bar rounded-full"
+              :style="{width: (activeCriticEval.confidence * 100) + '%'}">
+            </div>
+          </div>
+          <!-- Threshold marker -->
+          <div class="relative h-2 -mt-2">
+            <div class="absolute w-0.5 h-3 bg-white/40 rounded"
+              :style="{left: (form.confidence * 100) + '%'}">
+            </div>
+          </div>
+        </div>
+
+        <!-- Checklist -->
+        <div v-if="activeCriticEval.checklist && Object.keys(activeCriticEval.checklist).length > 0">
+          <p class="text-xs text-muted mb-2 uppercase tracking-wider">Quality Checklist</p>
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div v-for="(val, key) in activeCriticEval.checklist" :key="key"
+              :class="val ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'"
+              class="flex items-center gap-2 px-3 py-2 rounded-lg border text-xs">
+              <span>{{ val ? '✅' : '❌' }}</span>
+              <span :class="val ? 'text-emerald-300' : 'text-red-300'">{{ checklistLabel(key) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reasoning -->
+        <div v-if="activeCriticEval.reasoning"
+          class="text-xs text-muted bg-surface rounded-lg px-3 py-2.5 italic border border-border">
+          "{{ activeCriticEval.reasoning }}"
+        </div>
+
+        <!-- Gaps -->
+        <div v-if="activeCriticEval.gaps && activeCriticEval.gaps.length > 0">
+          <p class="text-xs text-muted mb-1 uppercase tracking-wider">Evidence Gaps</p>
+          <div class="flex flex-wrap gap-2">
+            <span v-for="gap in activeCriticEval.gaps" :key="gap"
+              class="text-xs px-2 py-1 bg-amber-500/10 border border-amber-500/30 rounded-full text-amber-300">
+              {{ gap }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Suggested focus -->
+        <div v-if="activeCriticEval.suggested_focus"
+          class="text-xs text-sky-300 bg-sky-500/10 border border-sky-500/20 rounded-lg px-3 py-2">
+          🔍 Next search focus: <strong>{{ activeCriticEval.suggested_focus }}</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── REPORT ────────────────────────────────────────────────────── -->
+    <div v-if="report" class="bg-card border border-border rounded-xl p-6 slide-in">
+      <div class="flex items-start justify-between mb-5">
+        <div>
+          <h3 class="text-white font-bold text-xl">{{ report.title }}</h3>
+          <div class="flex items-center gap-3 mt-2 text-xs text-muted">
+            <span>{{ report.word_count }} words</span>
+            <span>·</span>
+            <span>{{ report.sections ? report.sections.length : 0 }} sections</span>
+            <span>·</span>
+            <span>{{ report.sources ? report.sources.length : 0 }} sources</span>
+            <span>·</span>
+            <span :class="report.confidence >= 0.7 ? 'text-emerald-400' : 'text-amber-400'">
+              {{ (report.confidence * 100).toFixed(0) }}% confidence
+            </span>
+          </div>
+        </div>
+        <span v-if="outcome === 'published'"
+          class="text-xs px-3 py-1.5 bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 rounded-full font-medium">
+          Published
+        </span>
+      </div>
+
+      <!-- Executive summary -->
+      <div class="bg-surface border border-border rounded-lg px-4 py-4 mb-5">
+        <p class="text-xs text-muted uppercase tracking-wider mb-2">Executive Summary</p>
+        <p class="text-sm leading-relaxed text-white/80">{{ report.summary }}</p>
+      </div>
+
+      <!-- Sections accordion -->
+      <div class="space-y-3">
+        <div v-for="(section, i) in report.sections" :key="i"
+          class="border border-border rounded-lg overflow-hidden">
+          <button @click="toggleSection(i)"
+            class="w-full flex items-center justify-between px-4 py-3 hover:bg-surface text-left transition-colors">
+            <span class="text-white font-medium text-sm">{{ section.title }}</span>
+            <div class="flex items-center gap-3">
+              <span class="text-xs text-muted">{{ section.sources ? section.sources.length : 0 }} sources</span>
+              <svg :class="openSections.has(i) ? 'rotate-180' : ''" class="w-4 h-4 text-muted transition-transform"
+                fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+              </svg>
+            </div>
+          </button>
+          <div v-if="openSections.has(i)" class="px-4 pb-4 border-t border-border">
+            <div class="report-body mt-3 text-sm" v-html="renderMarkdown(section.content)"></div>
+            <!-- Sources for this section -->
+            <div v-if="section.sources && section.sources.length" class="mt-3 flex flex-wrap gap-2">
+              <a v-for="src in section.sources" :key="src" :href="src" target="_blank"
+                class="text-xs text-accent hover:underline bg-accent/10 px-2 py-1 rounded">
+                {{ domainOf(src) }}
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── VERIFICATION ──────────────────────────────────────────────── -->
+    <div v-if="verification.length > 0" class="bg-card border border-border rounded-xl p-5 slide-in">
+      <h3 class="text-white font-semibold flex items-center gap-2 mb-4">
+        <svg class="w-4 h-4 text-teal-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>
+        </svg>
+        URL Verification
+        <span class="text-xs text-muted font-normal">
+          ({{ verification.filter(v => v.verified).length }}/{{ verification.length }} live)
+        </span>
+      </h3>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div v-for="v in verification" :key="v.source_url"
+          :class="v.verified ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'"
+          class="flex items-start gap-3 p-3 rounded-lg border">
+          <span class="text-lg flex-shrink-0">{{ v.verified ? '✅' : '❌' }}</span>
+          <div class="min-w-0">
+            <a :href="v.source_url" target="_blank"
+              class="text-xs text-accent hover:underline truncate block max-w-full">
+              {{ domainOf(v.source_url) }}
+            </a>
+            <p class="text-xs text-muted mt-0.5">{{ v.claim }}</p>
+            <p v-if="v.failure_reason" class="text-xs text-red-400 mt-0.5">{{ v.failure_reason }}</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── BOTTOM GRID: COST TRACKER + AUDIT LOG ────────────────────── -->
+    <div v-if="costRecords.length > 0 || auditLog.length > 0"
+      class="grid grid-cols-1 md:grid-cols-2 gap-4 slide-in">
+
+      <!-- Cost breakdown table -->
+      <div v-if="costRecords.length > 0" class="bg-card border border-border rounded-xl p-5">
+        <h3 class="text-white font-semibold flex items-center gap-2 mb-4">
+          <svg class="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          Cost Breakdown
+        </h3>
+        <div class="space-y-1.5 max-h-52 overflow-y-auto">
+          <div v-for="(cr, i) in costRecords" :key="i"
+            class="flex items-center justify-between text-xs p-2 rounded hover:bg-surface transition-colors">
+            <div class="flex items-center gap-2">
+              <span class="w-20 text-muted font-mono">{{ cr.node }}</span>
+              <span class="text-muted/60">{{ cr.model.split('/').pop() }}</span>
+            </div>
+            <div class="flex items-center gap-3 text-muted">
+              <span>↑{{ cr.input_tokens }}</span>
+              <span>↓{{ cr.output_tokens }}</span>
+              <span class="text-emerald-300 font-mono w-16 text-right">${{ cr.cost_usd.toFixed(5) }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="border-t border-border mt-3 pt-3 flex justify-between text-sm font-semibold">
+          <span class="text-muted">Total</span>
+          <span class="text-emerald-400 font-mono">${{ totalCost.toFixed(5) }}</span>
+        </div>
+      </div>
+
+      <!-- Event log -->
+      <div class="bg-card border border-border rounded-xl p-5">
+        <h3 class="text-white font-semibold flex items-center gap-2 mb-4">
+          <svg class="w-4 h-4 text-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+          </svg>
+          Event Log
+          <span class="text-xs text-muted font-normal">({{ auditLog.length }} events)</span>
+        </h3>
+        <div class="space-y-0.5 max-h-52 overflow-y-auto font-mono" ref="logContainer">
+          <div v-for="(entry, i) in auditLog" :key="i"
+            class="log-entry flex gap-2 text-muted hover:text-white transition-colors py-0.5">
+            <span class="text-muted/50 w-16 flex-shrink-0">{{ entry.time }}</span>
+            <span :class="logColor(entry.type)">{{ entry.type }}</span>
+            <span class="truncate">{{ entry.summary }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── OUTCOME BANNER ────────────────────────────────────────────── -->
+    <div v-if="outcome === 'published'" class="slide-in">
+      <div class="bg-emerald-500/10 border border-emerald-500/40 rounded-xl p-6 flex items-center gap-4">
+        <div class="text-4xl">🎉</div>
+        <div>
+          <h3 class="text-emerald-300 font-bold text-lg">Report Published</h3>
+          <p class="text-emerald-200/60 text-sm mt-1">
+            Research complete in {{ iterationCount }} iteration{{ iterationCount !== 1 ? 's' : '' }} ·
+            ${{ totalCost.toFixed(4) }} total cost
+          </p>
+        </div>
+        <button @click="reset" class="ml-auto px-4 py-2 rounded-lg bg-emerald-500/20 text-emerald-300 text-sm hover:bg-emerald-500/30 transition-colors">
+          New Research
+        </button>
+      </div>
+    </div>
+
+    <div v-if="outcome === 'escalated'" class="slide-in">
+      <div class="bg-red-500/10 border border-red-500/40 rounded-xl p-6 flex items-start gap-4">
+        <div class="text-4xl">⚠️</div>
+        <div class="flex-1">
+          <h3 class="text-red-300 font-bold text-lg">Escalated</h3>
+          <p class="text-red-200/60 text-sm mt-1">{{ escalationReason || 'Run escalated due to unrecoverable error.' }}</p>
+        </div>
+        <button @click="reset" class="ml-auto px-4 py-2 rounded-lg bg-red-500/20 text-red-300 text-sm hover:bg-red-500/30 transition-colors">
+          Try Again
+        </button>
+      </div>
+    </div>
+
+  </div><!-- /max-w-7xl -->
+
+  <!-- ── HITL REVIEW MODAL ─────────────────────────────────────────── -->
+  <div v-if="isAwaitingReview" class="modal-backdrop">
+    <div class="bg-card border border-border rounded-2xl w-full max-w-2xl mx-4 max-h-screen overflow-y-auto">
+      <div class="p-6 border-b border-border">
+        <h2 class="text-white font-bold text-xl flex items-center gap-2">
+          <svg class="w-6 h-6 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+          </svg>
+          Human Review Required
+          <span v-if="hitlCount > 1" class="text-xs text-muted font-normal ml-1">(review #{{ hitlCount }})</span>
+        </h2>
+        <p class="text-muted text-sm mt-1">
+          Critic confidence: <strong :class="lastConfidence >= form.confidence ? 'text-emerald-400' : 'text-amber-400'">
+            {{ (lastConfidence * 100).toFixed(0) }}%
+          </strong>
+          · Review the draft and choose an action below.
+        </p>
+      </div>
+
+      <!-- Report preview in modal -->
+      <div v-if="reportForReview" class="p-6 border-b border-border space-y-3">
+        <p class="text-xs text-muted uppercase tracking-wider">Draft Preview</p>
+        <h3 class="text-white font-semibold">{{ reportForReview.title }}</h3>
+        <p class="text-sm text-muted leading-relaxed">{{ reportForReview.summary }}</p>
+        <div class="flex flex-wrap gap-2 text-xs text-muted">
+          <span>{{ reportForReview.word_count }} words</span>
+          <span>·</span>
+          <span>{{ reportForReview.sections ? reportForReview.sections.length : 0 }} sections</span>
+          <span>·</span>
+          <span>{{ reportForReview.sources ? reportForReview.sources.length : 0 }} sources</span>
+        </div>
+      </div>
+
+      <!-- Review actions -->
+      <div class="p-6 space-y-4">
+        <div class="grid grid-cols-3 gap-3">
+          <button @click="review.status = 'approved'"
+            :class="review.status === 'approved'
+              ? 'border-emerald-500 bg-emerald-500/20 text-emerald-300'
+              : 'border-border text-muted hover:border-emerald-500/50'"
+            class="flex flex-col items-center gap-1 border rounded-xl p-4 transition-all">
+            <span class="text-2xl">✅</span>
+            <span class="text-sm font-medium">Approve</span>
+            <span class="text-xs opacity-60">Publish as-is</span>
+          </button>
+          <button @click="review.status = 'needs_revision'"
+            :class="review.status === 'needs_revision'
+              ? 'border-amber-500 bg-amber-500/20 text-amber-300'
+              : 'border-border text-muted hover:border-amber-500/50'"
+            class="flex flex-col items-center gap-1 border rounded-xl p-4 transition-all">
+            <span class="text-2xl">✏️</span>
+            <span class="text-sm font-medium">Revise</span>
+            <span class="text-xs opacity-60">Redraft with feedback</span>
+          </button>
+          <button @click="review.status = 'rejected'"
+            :class="review.status === 'rejected'
+              ? 'border-red-500 bg-red-500/20 text-red-300'
+              : 'border-border text-muted hover:border-red-500/50'"
+            class="flex flex-col items-center gap-1 border rounded-xl p-4 transition-all">
+            <span class="text-2xl">🔄</span>
+            <span class="text-sm font-medium">Re-research</span>
+            <span class="text-xs opacity-60">Run more searches</span>
+          </button>
+        </div>
+
+        <!-- Revision instructions (shown for revise/reject) -->
+        <div v-if="review.status !== 'approved'" class="space-y-3">
+          <div>
+            <label class="block text-sm text-muted mb-2">
+              {{ review.status === 'needs_revision' ? 'Revision Instructions' : 'What to research differently?' }}
+            </label>
+            <textarea v-model="review.instructions" rows="3"
+              placeholder="e.g. Focus more on recent 2024 developments. Add cost comparison data."
+              class="w-full bg-surface border border-border rounded-lg px-4 py-3 text-white placeholder-muted resize-none focus:outline-none focus:border-accent text-sm">
+            </textarea>
+          </div>
+          <div>
+            <label class="block text-sm text-muted mb-2">Required sources to add (one URL per line)</label>
+            <textarea v-model="review.requiredSources" rows="2"
+              placeholder="https://example.com/article"
+              class="w-full bg-surface border border-border rounded-lg px-4 py-3 text-white placeholder-muted resize-none focus:outline-none focus:border-accent text-sm font-mono">
+            </textarea>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <button @click="submitReview"
+          :disabled="submittingReview"
+          class="w-full py-3 rounded-xl font-semibold text-sm transition-all
+                 bg-accent text-white hover:bg-blue-400 disabled:opacity-40">
+          <span v-if="submittingReview">Submitting…</span>
+          <span v-else-if="review.status === 'approved'">✅ Approve &amp; Publish</span>
+          <span v-else-if="review.status === 'needs_revision'">✏️ Send for Revision</span>
+          <span v-else>🔄 Send for Re-research</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /app -->
+
+<script>
+const { createApp, ref, computed, reactive, nextTick, watch } = Vue;
+
+createApp({
+  setup() {
+    // ── Form inputs ────────────────────────────────────────────────────
+    const form = reactive({
+      question:      '',
+      openrouterKey: localStorage.getItem('openrouter_key') || '',
+      budget:        2.00,
+      maxIters:      3,
+      confidence:    0.65,
+      autonomyLevel: 0,
+      userId:        'web_user',
+    });
+
+    // Persist API key in localStorage so users don't have to re-enter it
+    watch(() => form.openrouterKey, (val) => {
+      localStorage.setItem('openrouter_key', val);
+    });
+
+    const autonomyOptions = [
+      { value: 0, label: 'Full Review',   desc: 'Always ask for approval' },
+      { value: 2, label: 'Auto Approve',  desc: 'Auto if confidence ≥ threshold' },
+      { value: 3, label: 'Always Auto',   desc: 'Skip review entirely' },
+    ];
+
+    // ── Run state ──────────────────────────────────────────────────────
+    const status        = ref('idle');   // idle | starting | running | awaiting_review | done | error
+    const threadId      = ref(null);
+    const error         = ref(null);
+    const outcome       = ref(null);     // published | escalated
+    const escalationReason = ref('');
+
+    // ── Agent outputs ──────────────────────────────────────────────────
+    const intent        = ref(null);
+    const searchPlan    = ref(null);
+    const searchResults = ref([]);
+    const criticEvals   = ref([]);
+    const report        = ref(null);
+    const verification  = ref([]);
+    const costRecords   = ref([]);
+    const totalCost     = ref(0);
+    const iterationCount = ref(0);
+    const confidence    = ref(0);
+
+    // ── Pipeline nodes ─────────────────────────────────────────────────
+    const pipeline = reactive([
+      { id: 'intent',      label: 'Intent',    status: 'pending' },
+      { id: 'search_plan', label: 'Plan',       status: 'pending' },
+      { id: 'search_exec', label: 'Search',     status: 'pending' },
+      { id: 'critic',      label: 'Critic',     status: 'pending' },
+      { id: 'draft',       label: 'Synthesis',  status: 'pending' },
+      { id: 'verify',      label: 'Verify',     status: 'pending' },
+      { id: 'approve',     label: 'Review',     status: 'pending' },
+      { id: 'publish',     label: 'Publish',    status: 'pending' },
+    ]);
+
+    // ── Critic tab ─────────────────────────────────────────────────────
+    const activeCriticTab = ref(0);
+    const activeCriticEval = computed(() => criticEvals.value[activeCriticTab.value] || null);
+
+    // ── Report display ─────────────────────────────────────────────────
+    const openSections   = ref(new Set([0]));   // first section open by default
+    const showAllResults = ref(false);
+
+    // ── HITL review ────────────────────────────────────────────────────
+    const isAwaitingReview = ref(false);
+    const reportForReview  = ref(null);
+    const lastConfidence   = ref(0);
+    const submittingReview = ref(false);
+    const review = reactive({
+      status:          'approved',
+      instructions:    '',
+      requiredSources: '',
+    });
+
+    // ── Audit log ──────────────────────────────────────────────────────
+    const auditLog = ref([]);
+    const logContainer = ref(null);
+
+    // ── Graph trace + topology ─────────────────────────────────────────
+    const graphTrace     = ref([]);      // [{type:'node'|'loop', node, time, delta, id}]
+    const graphView      = ref('trace'); // 'trace' | 'topo'
+    const graphOpen      = ref(true);
+    const activeNode     = ref(null);
+    const traceContainer = ref(null);
+    const hitlCount      = ref(0);
+    let _traceSeq        = 0;
+
+    const TOPO_NODES = [
+      { id: 'intent',      label: 'intent',      cx: 240, cy: 52,  w: 84,  h: 24 },
+      { id: 'search_plan', label: 'search_plan', cx: 240, cy: 124, w: 98,  h: 24 },
+      { id: 'search_exec', label: 'search_exec', cx: 240, cy: 196, w: 98,  h: 24 },
+      { id: 'tick',        label: 'tick ↺',      cx: 240, cy: 255, w: 60,  h: 22 },
+      { id: 'critic',      label: 'critic',      cx: 240, cy: 320, w: 84,  h: 24 },
+      { id: 'draft',       label: 'synthesis',   cx: 240, cy: 392, w: 84,  h: 24 },
+      { id: 'verify',      label: 'verify',      cx: 240, cy: 453, w: 72,  h: 22 },
+      { id: 'approve',     label: 'approve',     cx: 240, cy: 516, w: 84,  h: 24 },
+      { id: 'publish',     label: 'publish',     cx: 120, cy: 579, w: 78,  h: 24 },
+      { id: 'escalate',    label: 'escalate',    cx: 408, cy: 392, w: 80,  h: 24 },
+    ];
+
+    function topoNodeStatus(id) {
+      if (activeNode.value === id) return 'running';
+      const seen = graphTrace.value.some(e => e.type === 'node' && e.node === id);
+      if (!seen) return 'pending';
+      if (id === 'escalate') return 'error';
+      return 'done';
+    }
+    function topoNodeFill(id) {
+      return { running:'#143052', done:'#0d2818', error:'#2d1111', pending:'#161b22' }[topoNodeStatus(id)];
+    }
+    function topoNodeStroke(id) {
+      return { running:'#58a6ff', done:'#2ea043', error:'#f85149', pending:'#21262d' }[topoNodeStatus(id)];
+    }
+    function topoNodeTextFill(id) {
+      return { running:'#93c5fd', done:'#86efac', error:'#fca5a5', pending:'#6b7280' }[topoNodeStatus(id)];
+    }
+
+    function ts() {
+      const n = new Date();
+      return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}:${String(n.getSeconds()).padStart(2,'0')}`;
+    }
+    function formatDelta(d) {
+      if (!d) return '';
+      return Object.entries(d).map(([k,v]) => `${k}: ${v}`).join(' · ');
+    }
+    function pushNodeTrace(nodeId) {
+      const loopable = ['search_plan','search_exec','tick','critic','draft','verify','approve'];
+      if (loopable.includes(nodeId) && graphTrace.value.some(e => e.type==='node' && e.node===nodeId)) {
+        graphTrace.value.push({ type:'loop', node:nodeId, time:ts(), id:_traceSeq++ });
+      }
+      graphTrace.value.push({ type:'node', node:nodeId, time:ts(), delta:null, id:_traceSeq++ });
+      nextTick(() => { if(traceContainer.value) traceContainer.value.scrollTop = traceContainer.value.scrollHeight; });
+    }
+    function updateLastTrace(nodeId, delta) {
+      for (let i = graphTrace.value.length - 1; i >= 0; i--) {
+        const e = graphTrace.value[i];
+        if (e.type === 'node' && e.node === nodeId && !e.delta) { e.delta = delta; return; }
+      }
+    }
+    // Overwrites delta even if already set (e.g. approve: waiting → decision)
+    function patchLastTrace(nodeId, delta) {
+      for (let i = graphTrace.value.length - 1; i >= 0; i--) {
+        const e = graphTrace.value[i];
+        if (e.type === 'node' && e.node === nodeId) { e.delta = delta; return; }
+      }
+    }
+    // At run end: fill any entry still showing "running…" with a generic done marker
+    function sweepNullDeltas() {
+      graphTrace.value.forEach(e => { if (e.type === 'node' && !e.delta) e.delta = { status: 'done ✓' }; });
+    }
+
+    // ── SSE connection ─────────────────────────────────────────────────
+    let eventSource = null;
+
+    // ── Status helpers ─────────────────────────────────────────────────
+    const statusLabel = computed(() => ({
+      idle:            'Idle',
+      starting:        'Starting…',
+      running:         'Running',
+      awaiting_review: 'Awaiting Review',
+      done:            'Complete',
+      error:           'Error',
+    }[status.value] || status.value));
+
+    const statusDotClass = computed(() => ({
+      running:         'bg-accent pulse',
+      awaiting_review: 'bg-amber-400 pulse',
+      done:            'bg-emerald-400',
+      error:           'bg-red-500',
+    }[status.value] || 'bg-muted'));
+
+    // ── Helpers ────────────────────────────────────────────────────────
+    function domainOf(url) {
+      try { return new URL(url).hostname.replace('www.', ''); } catch { return url.slice(0, 40); }
+    }
+    function credClass(score) {
+      if (score >= 0.7) return 'bg-emerald-400';
+      if (score >= 0.4) return 'bg-amber-400';
+      return 'bg-red-400';
+    }
+    function priorityColor(p) {
+      const c = ['', 'border-red-500 text-red-400', 'border-orange-500 text-orange-400',
+                     'border-amber-500 text-amber-400', 'border-sky-500 text-sky-400',
+                     'border-muted text-muted'];
+      return c[p] || c[3];
+    }
+    function checklistLabel(key) {
+      return {
+        source_diversity:   'Source Diversity',
+        credibility_ok:     'Credibility',
+        coverage_ok:        'Topic Coverage',
+        has_recent_sources: 'Recent Sources',
+        depth_ok:           'Depth',
+      }[key] || key;
+    }
+    function renderMarkdown(text) {
+      if (!text) return '';
+      return marked.parse(text);
+    }
+    function logColor(type) {
+      if (type.includes('complete') || type === 'published') return 'text-emerald-400';
+      if (type.includes('error') || type.includes('escalat')) return 'text-red-400';
+      if (type === 'hitl_required') return 'text-amber-400';
+      if (type === 'cost_update') return 'text-sky-300';
+      return 'text-muted';
+    }
+    function setNodeStatus(nodeId, nodeStatus) {
+      const node = pipeline.find(n => n.id === nodeId);
+      if (node) node.status = nodeStatus;
+    }
+    function setNodeActive(nodeId) {
+      pipeline.forEach(n => {
+        if (n.status === 'active') n.status = 'done';
+      });
+      const node = pipeline.find(n => n.id === nodeId);
+      if (node) node.status = 'active';
+    }
+    function addLog(type, summary) {
+      const now = new Date();
+      const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+      auditLog.value.push({ type, summary, time });
+      nextTick(() => {
+        if (logContainer.value) logContainer.value.scrollTop = logContainer.value.scrollHeight;
+      });
+    }
+    function toggleSection(i) {
+      const s = openSections.value;
+      if (s.has(i)) s.delete(i); else s.add(i);
+      openSections.value = new Set(s);
+    }
+
+    // ── SSE event dispatcher ───────────────────────────────────────────
+    function handleEvent(rawEvent) {
+      let event;
+      try { event = JSON.parse(rawEvent); } catch { return; }
+      const { type, payload } = event;
+
+      addLog(type, JSON.stringify(payload).slice(0, 80));
+
+      switch (type) {
+        case 'connected':
+          status.value = 'running';
+          break;
+
+        case 'run_started':
+          status.value = 'running';
+          break;
+
+        case 'node_active':
+          setNodeActive(payload.node);
+          activeNode.value = payload.node;
+          pushNodeTrace(payload.node);
+          break;
+
+        case 'intent_complete':
+          intent.value = payload;
+          setNodeStatus('intent', 'done');
+          updateLastTrace('intent', {
+            topic: payload.topic,
+            type:  payload.task_type,
+            conf:  (payload.confidence * 100).toFixed(0) + '%',
+          });
+          break;
+
+        case 'search_plan_complete':
+          searchPlan.value = payload;
+          setNodeStatus('search_plan', 'done');
+          updateLastTrace('search_plan', { queries: (payload.queries?.length || 0) + ' queries' });
+          break;
+
+        case 'search_results_update':
+          searchResults.value.push(...(payload.results || []));
+          setNodeStatus('search_exec', 'done');
+          updateLastTrace('search_exec', {
+            results: (payload.results?.length || 0) + ' results',
+            errors:  payload.error_count + ' errors',
+          });
+          break;
+
+        case 'iteration_tick':
+          iterationCount.value = payload.iteration_count;
+          updateLastTrace('tick', {
+            iter: 'cycle ' + payload.iteration_count,
+            cost: '$' + (payload.cost_usd || 0).toFixed(4),
+          });
+          break;
+
+        case 'critic_complete':
+          criticEvals.value.push(payload);
+          activeCriticTab.value = criticEvals.value.length - 1;
+          confidence.value = payload.confidence || 0;
+          setNodeStatus('critic', 'done');
+          updateLastTrace('critic', {
+            verdict: payload.verdict,
+            conf:    (payload.confidence * 100).toFixed(0) + '%',
+            gaps:    (payload.gaps?.length || 0) + ' gaps',
+          });
+          break;
+
+        case 'draft_complete':
+          report.value = payload;
+          openSections.value = new Set(payload.sections ? payload.sections.map((_, i) => i) : []);
+          setNodeStatus('draft', 'done');
+          updateLastTrace('draft', {
+            words: payload.word_count + ' words',
+            conf:  (payload.confidence * 100).toFixed(0) + '% conf',
+          });
+          break;
+
+        case 'verification_complete':
+          verification.value = payload.results || [];
+          setNodeStatus('verify', 'done');
+          updateLastTrace('verify', {
+            live: (payload.results?.filter(v => v.verified).length || 0) +
+                  '/' + (payload.results?.length || 0) + ' live',
+          });
+          break;
+
+        case 'hitl_required':
+          reportForReview.value  = payload.report;
+          lastConfidence.value   = payload.confidence || 0;
+          isAwaitingReview.value = true;
+          hitlCount.value       += 1;
+          status.value           = 'awaiting_review';
+          activeNode.value       = 'approve';
+          setNodeStatus('approve', 'active');
+          // approve interrupt fires BEFORE the node runs, so node_active is never emitted
+          // — push the trace entry here so it appears during the review phase
+          pushNodeTrace('approve');
+          updateLastTrace('approve', { status: 'awaiting human review' });
+          break;
+
+        case 'review_applied':
+          isAwaitingReview.value = false;
+          setNodeStatus('approve', 'done');
+          activeNode.value = null;
+          // delta already set by hitl_required; overwrite with the final decision
+          patchLastTrace('approve', { decision: payload.status });
+          addLog('review_applied', `status=${payload.status}`);
+          break;
+
+        case 'cost_update':
+          costRecords.value.push(payload);
+          totalCost.value += payload.cost_usd || 0;
+          break;
+
+        case 'published':
+          outcome.value = 'published';
+          status.value  = 'done';
+          activeNode.value = null;
+          pipeline.forEach(n => { if (n.status === 'active') n.status = 'done'; });
+          setNodeStatus('publish', 'done');
+          // update the entry created by node_active (not a new push — avoids double entry)
+          updateLastTrace('publish', { outcome: 'published ✓' });
+          sweepNullDeltas();
+          break;
+
+        case 'escalated':
+          outcome.value = 'escalated';
+          escalationReason.value = payload.reason || '';
+          status.value = 'done';
+          activeNode.value = null;
+          pipeline.forEach(n => { if (n.status === 'active') n.status = 'error'; });
+          updateLastTrace('escalate', { reason:(payload.reason||'').slice(0,60) });
+          sweepNullDeltas();
+          break;
+
+        case 'error':
+          error.value = payload.message;
+          status.value = 'error';
+          activeNode.value = null;
+          pipeline.forEach(n => { if (n.status === 'active') n.status = 'error'; });
+          sweepNullDeltas();
+          break;
+
+        case 'stream_complete':
+          if (status.value === 'running') status.value = 'done';
+          activeNode.value = null;
+          sweepNullDeltas();
+          eventSource && eventSource.close();
+          break;
+      }
+    }
+
+    // ── Start research ─────────────────────────────────────────────────
+    async function startResearch() {
+      if (!form.question.trim()) return;
+      if (!form.openrouterKey.trim()) { error.value = 'Please enter your OpenRouter API key.'; return; }
+      error.value = null;
+      status.value = 'starting';
+      pipeline.forEach(n => n.status = 'pending');
+      searchResults.value = [];
+      criticEvals.value = [];
+      costRecords.value = [];
+      totalCost.value = 0;
+      auditLog.value = [];
+      report.value = null;
+      verification.value = [];
+      intent.value = null;
+      searchPlan.value = null;
+      outcome.value = null;
+      iterationCount.value = 0;
+      confidence.value = 0;
+      openSections.value = new Set();
+      graphTrace.value = [];
+      activeNode.value = null;
+      hitlCount.value = 0;
+      _traceSeq = 0;
+
+      try {
+        // Create run
+        const res = await fetch('/api/research', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question:       form.question,
+            openrouter_key: form.openrouterKey,
+            budget:         form.budget,
+            max_iters:      form.maxIters,
+            confidence:     form.confidence,
+            autonomy_level: form.autonomyLevel,
+            user_id:        form.userId,
+          }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const { thread_id } = await res.json();
+        threadId.value = thread_id;
+
+        // Open SSE stream
+        eventSource = new EventSource(`/api/research/${thread_id}/events`);
+        eventSource.onmessage = (e) => handleEvent(e.data);
+        eventSource.onerror = () => {
+          if (status.value === 'running') {
+            error.value = 'Connection lost';
+            status.value = 'error';
+          }
+        };
+      } catch (e) {
+        error.value = e.message;
+        status.value = 'error';
+      }
+    }
+
+    // ── Submit HITL review ─────────────────────────────────────────────
+    async function submitReview() {
+      if (!threadId.value) return;
+      submittingReview.value = true;
+      try {
+        const body = {
+          status:                review.status,
+          revision_instructions: review.instructions || null,
+          required_sources:      review.requiredSources
+            ? review.requiredSources.split('\n').map(s => s.trim()).filter(Boolean)
+            : null,
+        };
+        const res = await fetch(`/api/research/${threadId.value}/review`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        isAwaitingReview.value = false;
+        status.value = 'running';
+        review.instructions = '';
+        review.requiredSources = '';
+      } catch (e) {
+        error.value = e.message;
+      } finally {
+        submittingReview.value = false;
+      }
+    }
+
+    // ── Reset ──────────────────────────────────────────────────────────
+    function reset() {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      status.value = 'idle';
+      threadId.value = null;
+      error.value = null;
+      outcome.value = null;
+    }
+
+    return {
+      form, autonomyOptions,
+      status, statusLabel, statusDotClass,
+      threadId, error, outcome, escalationReason,
+      intent, searchPlan, searchResults, criticEvals,
+      activeCriticTab, activeCriticEval,
+      report, verification, costRecords, totalCost,
+      iterationCount, confidence,
+      pipeline, openSections, showAllResults,
+      isAwaitingReview, reportForReview, lastConfidence, hitlCount,
+      review, submittingReview,
+      auditLog, logContainer,
+      graphTrace, graphView, graphOpen, traceContainer,
+      TOPO_NODES, activeNode,
+      topoNodeStatus, topoNodeFill, topoNodeStroke, topoNodeTextFill,
+      // methods
+      startResearch, submitReview, reset,
+      domainOf, credClass, priorityColor, checklistLabel,
+      renderMarkdown, logColor, toggleSection, formatDelta,
+    };
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
