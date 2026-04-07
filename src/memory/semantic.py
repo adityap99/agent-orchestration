@@ -11,6 +11,7 @@ silently return empty results so the system continues to work normally.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from datetime import datetime, timezone
@@ -125,7 +126,7 @@ class SemanticStore:
         if not self.available:
             return None
         try:
-            claim_id = f"claim:{abs(hash(url)) % (10 ** 9)}"
+            claim_id = "claim:" + hashlib.sha256(url.encode()).hexdigest()[:16]
             results  = self._claims.get(ids=[claim_id], include=["metadatas"])
             if not results["ids"]:
                 return None
@@ -219,7 +220,7 @@ class SemanticStore:
             return
         with _WRITE_LOCK:
             try:
-                claim_id = f"claim:{abs(hash(url)) % (10 ** 9)}"
+                claim_id = "claim:" + hashlib.sha256(url.encode()).hexdigest()[:16]
                 self._claims.upsert(
                     documents=[url],
                     metadatas=[
