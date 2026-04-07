@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.config import COST_PER_TOKEN
 from src.llm import get_llm
+from src.memory.context_window import ContextWindowManager
 from src.state import AgentState, CostRecord, ReportSchema, ReportSection
 
 
@@ -64,18 +65,14 @@ def synthesis_agent(state: AgentState) -> dict[str, Any]:
     llm     = get_llm(config.model_synthesis, temperature=0.2, api_key=api_key)
     results = state.get("search_results", [])
 
-    # Sort by credibility descending; take top 20 to avoid context overflow
+    # Sort by credibility descending; keep top 20 for the fallback report path
     sorted_results = sorted(results, key=lambda r: r.credibility_score, reverse=True)[:20]
 
-    # Build evidence block
-    evidence_parts = []
-    for i, r in enumerate(sorted_results, 1):
-        evidence_parts.append(
-            f"[Source {i}]\nURL: {r.url}\n"
-            f"Credibility: {r.credibility_score:.2f}\n"
-            f"Content: {r.content[:800]}\n"
-        )
-    evidence_text = "\n---\n".join(evidence_parts)
+    # Build evidence block via ContextWindowManager (dedup + credibility-sorted)
+    evidence_text = ContextWindowManager.pack_for_synthesis(state, max_results=20)
+
+    # Retrieve related prior report sections from semantic memory
+    prior_context = _fetch_prior_sections(state["question"])
 
     # Check for revision feedback from human reviewer or critic
     revision_context = ""
@@ -89,7 +86,7 @@ def synthesis_agent(state: AgentState) -> dict[str, Any]:
 
 Sources to use (sorted by credibility):
 {evidence_text}
-{revision_context}
+{revision_context}{prior_context}
 
 Write a comprehensive research report using ONLY the sources above."""
 
@@ -152,3 +149,21 @@ Write a comprehensive research report using ONLY the sources above."""
         "messages":     [AIMessage(content=f"Draft complete: '{report.title}' ({report.word_count} words, confidence {report.confidence:.2f})", name="synthesis")],
         "cost_records": [cost_rec],
     }
+
+
+def _fetch_prior_sections(question: str) -> str:
+    """
+    Retrieve related prior report sections from semantic memory.
+    Returns a formatted string to inject into the synthesis prompt, or ''.
+    """
+    try:
+        from src.memory import semantic_store
+        prior = semantic_store.search_reports(question, n=3)
+        if not prior:
+            return ""
+        lines = ["\n\nRelated sections from prior research (for reference only):"]
+        for p in prior:
+            lines.append(f"\n[Prior — {p['title']}]\n{str(p['content'])[:400]}")
+        return "\n".join(lines)
+    except Exception:
+        return ""

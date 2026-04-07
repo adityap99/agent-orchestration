@@ -65,6 +65,7 @@ class RunState:
         self.confidence_threshold = confidence_threshold
         self.status               = "created"      # created | running | awaiting_review | done
         self.last_confidence      = 0.0
+        self.outcome              = "unknown"       # published | escalated | unknown
         # Set when SSE client connects
         self.queue: Optional[asyncio.Queue] = None
         self.loop:  Optional[asyncio.AbstractEventLoop] = None
@@ -174,15 +175,86 @@ def _emit_node_events(rs: RunState, node_name: str, update: dict) -> None:
             emit("approve_complete", _dump(decision))
 
     elif node_name == "publish":
+        rs.outcome = "published"
         emit("published", {"outcome": "published"})
 
     elif node_name == "escalate":
+        rs.outcome = "escalated"
         msgs   = update.get("messages", [])
         reason = getattr(msgs[-1], "content", "") if msgs else ""
         emit("escalated", {"reason": reason[:800]})
 
     elif node_name in ("abort_budget", "abort_search", "abort_intent"):
         emit("abort_detected", {"node": node_name})
+
+
+def _persist_to_memory(rs: RunState) -> None:
+    """
+    Persist completed run data to all memory layers.
+    Called in a background daemon thread after the SSE stream closes.
+    Any failure is caught and swallowed — memory errors never surface to users.
+    """
+    try:
+        from src.memory import (
+            episodic_store,
+            procedural_store,
+            profile_store,
+            semantic_store,
+        )
+
+        graph_state = graph_app.get_state(rs.lg_config)
+        state       = graph_state.values
+
+        user_id  = state.get("user_id", "web_user")
+        intent   = state.get("intent")
+        report   = state.get("report")
+        decision = state.get("review_decision")
+        outcome  = rs.outcome
+
+        # Layer 1 — Episodic: persist completed run record
+        try:
+            episodic_store.save_run(rs.thread_id, user_id, state, outcome)
+        except Exception:
+            pass
+
+        # Layer 2 — Semantic: index search results + report sections
+        results = state.get("search_results", [])
+        try:
+            if results:
+                semantic_store.index_results(rs.thread_id, results)
+        except Exception:
+            pass
+        try:
+            if report:
+                semantic_store.index_report(rs.thread_id, report)
+        except Exception:
+            pass
+
+        # Layer 3 — Procedural: update topic search strategy
+        topic_cluster = intent.task_type if intent else "research"
+        confidence    = float(state.get("confidence", 0.0))
+        iterations    = int(state.get("iteration_count", 0))
+        gaps: list[str] = []
+        for ev in state.get("critic_evals", []):
+            if isinstance(ev, dict):
+                gaps.extend(ev.get("gaps", []))
+        try:
+            procedural_store.upsert_pattern(topic_cluster, iterations, confidence, gaps[:5])
+        except Exception:
+            pass
+
+        # Layer 4 — User profile: record run preferences
+        rev_instr: Optional[str] = None
+        if decision is not None and hasattr(decision, "revision_instructions"):
+            rev_instr = decision.revision_instructions
+        topic = intent.topic if intent else state.get("question", "")[:80]
+        try:
+            profile_store.record_run(user_id, topic, rs.autonomy_level, rev_instr)
+        except Exception:
+            pass
+
+    except Exception:
+        pass  # Memory failures are completely silent
 
 
 def _stream_graph(initial_state: dict, rs: RunState) -> None:
@@ -239,6 +311,13 @@ def _handle_post_stream(rs: RunState) -> None:
             # SSE stays open — client will POST /review to resume
     else:
         rs.status = "done"
+        # Persist to all memory layers in a background thread (non-blocking)
+        threading.Thread(
+            target=_persist_to_memory,
+            args=(rs,),
+            daemon=True,
+            name=f"memory-{rs.thread_id[:8]}",
+        ).start()
         _done(rs)
 
 
@@ -295,6 +374,15 @@ class ReviewRequest(PydanticModel):
 
 # ── API routes ────────────────────────────────────────────────────────────────
 
+def _load_user_profile(user_id: str) -> Optional[dict]:
+    """Load user profile from memory. Returns None on any failure."""
+    try:
+        from src.memory import profile_store
+        return profile_store.get_profile(user_id)
+    except Exception:
+        return None
+
+
 @web.post("/api/research")
 async def start_research(req: StartResearchRequest):
     """Start a new research run. Returns thread_id for the SSE endpoint."""
@@ -332,6 +420,8 @@ async def start_research(req: StartResearchRequest):
         "cost_usd":        0.0,
         "abort_reason":    None,
         "openrouter_key":  req.openrouter_key,
+        "memory_hints":    None,
+        "user_profile":    _load_user_profile(req.user_id),
     }
 
     rs = RunState(

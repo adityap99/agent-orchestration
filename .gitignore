@@ -27,3 +27,6 @@ build/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Memory store runtime data (auto-created, not source-controlled)
+/memory/

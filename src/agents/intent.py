@@ -103,6 +103,24 @@ def intent_agent(state: AgentState) -> dict[str, Any]:
 
     return {
         "intent":       intent,
+        "memory_hints": _load_memory_hints(intent),
         "messages":     [HumanMessage(content=f"Question: {state['question']}")],
         "cost_records": [cost_rec],
     }
+
+
+def _load_memory_hints(intent: IntentClassification) -> dict:
+    """Load procedural hints for the topic cluster. Returns {} on any failure."""
+    try:
+        from src.memory import procedural_store
+        pattern = procedural_store.get_pattern(intent.task_type)
+        if not pattern:
+            return {}
+        return {
+            "topic_cluster":  intent.task_type,
+            "avg_iterations": pattern["avg_iterations"],
+            "common_gaps":    pattern["common_gaps"],
+            "search_hints":   pattern["search_hints"],
+        }
+    except Exception:
+        return {}

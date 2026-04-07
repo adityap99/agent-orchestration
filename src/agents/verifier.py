@@ -22,7 +22,7 @@ from src.search import verify_url
 from src.state import AgentState, CostRecord, ReportSchema, VerificationResult
 
 
-def verifier_node(state: AgentState) -> dict[str, Any]:
+def verifier_node(state: AgentState) -> dict:
     """
     Node: verify
 
@@ -30,9 +30,9 @@ def verifier_node(state: AgentState) -> dict[str, Any]:
     Writes: verification (List[VerificationResult]), messages, cost_records
 
     Steps:
-      1. For each section+source: HTTP HEAD to check URL reachability.
-      2. Collect VerificationResult objects with pass/fail and reason.
-      3. Report verification summary in message for human reviewer context.
+      1. Check semantic cache — skip HTTP if URL was verified recently.
+      2. For uncached URLs: HTTP HEAD to check reachability.
+      3. Cache new results; collect VerificationResult objects.
     """
     report: ReportSchema | None = state.get("report")
     if not report:
@@ -45,32 +45,50 @@ def verifier_node(state: AgentState) -> dict[str, Any]:
     verification_results: list[VerificationResult] = []
 
     async def run_verifications() -> None:
-        tasks = []
+        tasks  = []
         claims = []
+
         for section in report.sections:
             for url in section.sources:
+                # ── Layer 2: check verification cache first ───────────────────
+                cached = _check_cache(url)
+                if cached is not None:
+                    verification_results.append(
+                        VerificationResult(
+                            claim=section.title,
+                            source_url=url,
+                            verified=cached,
+                            confidence=0.85,
+                            failure_reason=None if cached else "Cached: previously unreachable",
+                        )
+                    )
+                    continue  # Skip live HTTP check
+
                 tasks.append(verify_url(url, timeout=5.0))
                 claims.append((section.title, url))
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for (claim_title, url), result in zip(claims, results):
             if isinstance(result, Exception):
-                verification_results.append(VerificationResult(
+                vr = VerificationResult(
                     claim=claim_title,
                     source_url=url,
                     verified=False,
                     confidence=0.0,
                     failure_reason=str(result),
-                ))
+                )
             else:
                 is_reachable, status = result
-                verification_results.append(VerificationResult(
+                vr = VerificationResult(
                     claim=claim_title,
                     source_url=url,
                     verified=is_reachable,
                     confidence=0.9 if is_reachable else 0.1,
                     failure_reason=None if is_reachable else f"HTTP {status}",
-                ))
+                )
+            verification_results.append(vr)
+            # ── Layer 2: persist to cache ─────────────────────────────────────
+            _cache_result(url, vr.verified, vr.confidence)
 
     asyncio.run(run_verifications())
 
@@ -91,3 +109,21 @@ def verifier_node(state: AgentState) -> dict[str, Any]:
         "messages":     [AIMessage(content=summary, name="verifier")],
         "cost_records": [],  # No LLM call in URL-check verifier
     }
+
+
+def _check_cache(url: str):
+    """Return cached verification result (True/False) or None if not cached."""
+    try:
+        from src.memory import semantic_store
+        return semantic_store.is_claim_cached(url)
+    except Exception:
+        return None
+
+
+def _cache_result(url: str, verified: bool, confidence: float) -> None:
+    """Persist a verification result to the semantic cache."""
+    try:
+        from src.memory import semantic_store
+        semantic_store.cache_verification(url, verified, confidence)
+    except Exception:
+        pass

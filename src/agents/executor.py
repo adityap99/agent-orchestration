@@ -52,6 +52,9 @@ def search_executor_node(state: AgentState) -> dict[str, Any]:
     # Sort queries by priority descending
     sorted_queries = sorted(plan.queries, key=lambda q: q.priority, reverse=True)
 
+    # ── Layer 2: pre-fill from semantic cache ─────────────────────────────────
+    cached_results = _fetch_cached_sources(sorted_queries, plan.max_results_per_query)
+
     async def run_all() -> None:
         nonlocal used_fallback
         for sq in sorted_queries:
@@ -80,9 +83,13 @@ def search_executor_node(state: AgentState) -> dict[str, Any]:
 
     asyncio.run(run_all())
 
+    # Merge cached + fresh results (cached appear first, deduplicated by URL at critic)
+    all_results = cached_results + new_results
+
     # Build summary message for critic context
     summary_parts = [
-        f"Search complete: {len(new_results)} results from {len(sorted_queries)} queries."
+        f"Search complete: {len(new_results)} live results + {len(cached_results)} cached, "
+        f"from {len(sorted_queries)} queries."
     ]
     if used_fallback:
         summary_parts.append("Note: used fallback search provider for some queries.")
@@ -96,8 +103,35 @@ def search_executor_node(state: AgentState) -> dict[str, Any]:
     summary_parts.append(f"Average source credibility: {avg_cred:.2f}")
 
     return {
-        "search_results": new_results,
+        "search_results": all_results,
         "tool_errors":    new_errors,
         "messages":       [AIMessage(content=" ".join(summary_parts), name="executor")],
         "cost_records":   [],  # No LLM call in executor
     }
+
+
+def _fetch_cached_sources(sorted_queries: list, max_per_query: int) -> list[SearchResult]:
+    """Query semantic memory for cached source chunks. Returns [] on any failure."""
+    try:
+        from src.memory import semantic_store
+        cached: list[SearchResult] = []
+        seen_urls: set[str] = set()
+        for sq in sorted_queries:
+            for hit in semantic_store.search_sources(sq.query, n=max_per_query):
+                url = hit.get("url", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    try:
+                        cached.append(
+                            SearchResult(
+                                url=url,
+                                content=hit["content"],
+                                credibility_score=float(hit.get("credibility_score", 0.5)),
+                                query=hit.get("query", sq.query),
+                            )
+                        )
+                    except Exception:
+                        pass
+        return cached
+    except Exception:
+        return []

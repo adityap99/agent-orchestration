@@ -135,3 +135,7 @@ class AgentState(TypedDict):
     cost_usd:         float
     abort_reason:     Optional[str]
     openrouter_key:   str   # per-request key supplied by the UI (never stored long-term)
+
+    # ── MEMORY (populated at run start; read-only inside nodes) ──────────────
+    memory_hints:  Optional[dict]  # procedural + semantic hints for planner/critic
+    user_profile:  Optional[dict]  # loaded user preference profile

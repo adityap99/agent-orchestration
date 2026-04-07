@@ -10,3 +10,4 @@ python-dotenv>=1.0.0
 structlog>=24.0.0
 ddgs>=1.0.0
 rich>=13.0.0
+chromadb>=0.5.0

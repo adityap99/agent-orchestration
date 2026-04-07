@@ -88,7 +88,7 @@ Iteration: {state.get('iteration_count', 0) + 1}
 
 Already-executed queries (DO NOT repeat or rephrase these):
 {chr(10).join(f'  - {q}' for q in executed_queries) if executed_queries else '  (none yet — this is the first iteration)'}
-{critic_feedback}
+{critic_feedback}{_memory_hints_text(state)}
 
 Generate the next set of search queries."""
 
@@ -145,3 +145,19 @@ Generate the next set of search queries."""
         "messages":     [AIMessage(content=f"Search plan generated: {len(plan.queries)} queries", name="planner")],
         "cost_records": [cost_rec],
     }
+
+
+def _memory_hints_text(state: dict) -> str:
+    """Build a memory hints block for the planner prompt. Returns '' on failure."""
+    try:
+        hints = state.get("memory_hints") or {}
+        lines: list[str] = []
+        if hints.get("search_hints"):
+            lines.append("\nKnown effective search patterns for this topic type:")
+            lines.extend(f"  - {h}" for h in hints["search_hints"])
+        if hints.get("common_gaps"):
+            lines.append("\nCommon knowledge gaps in past runs on this topic:")
+            lines.extend(f"  - {g}" for g in hints["common_gaps"])
+        return "\n".join(lines)
+    except Exception:
+        return ""

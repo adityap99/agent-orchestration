@@ -23,6 +23,10 @@ MODEL_VERIFIER  = os.getenv("MODEL_VERIFIER",  "anthropic/claude-3-haiku")
 OPENROUTER_API_KEY  = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
+# ── Memory stores ─────────────────────────────────────────────────────────────
+MEMORY_DB_PATH     = os.getenv("MEMORY_DB_PATH",     "memory/memory.db")
+SEMANTIC_STORE_DIR = os.getenv("SEMANTIC_STORE_DIR", "memory/semantic_store")
+
 # ── Cost per token (USD) — approximate OpenRouter/Anthropic rates ─────────────
 COST_PER_TOKEN: dict[str, dict[str, float]] = {
     "anthropic/claude-3-haiku":    {"input": 0.00000025, "output": 0.00000125},

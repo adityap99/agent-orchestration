@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from src.config import COST_PER_TOKEN
 from src.llm import get_llm
+from src.memory.context_window import ContextWindowManager
 from src.state import AgentState, CostRecord
 
 
@@ -69,22 +70,25 @@ def critic_agent(state: AgentState) -> dict[str, Any]:
     results = state.get("search_results", [])
     errors  = state.get("tool_errors", [])
 
-    # Build evidence summary for the critic
-    evidence_chunks = []
-    for i, r in enumerate(results, 1):
-        evidence_chunks.append(
-            f"[{i}] URL: {r.url}\n"
-            f"    Credibility: {r.credibility_score:.2f}\n"
-            f"    Query: {r.query}\n"
-            f"    Content: {r.content[:500]}\n"
-        )
-
-    evidence_text = "\n".join(evidence_chunks) if evidence_chunks else "(No results retrieved)"
+    # Build evidence summary using ContextWindowManager (dedup by URL, top 25)
+    evidence_text = ContextWindowManager.pack_for_critic(state, max_results=25)
 
     avg_cred = (
-        sum(r.credibility_score for r in results) / len(results)
+        sum(
+            r.credibility_score if hasattr(r, "credibility_score") else r.get("credibility_score", 0.5)
+            for r in results
+        ) / len(results)
         if results else 0.0
     )
+
+    # Inject any known common gaps from procedural memory
+    memory_gap_hint = ""
+    hints = state.get("memory_hints") or {}
+    if hints.get("common_gaps"):
+        memory_gap_hint = (
+            "\n\nKnown common gaps for this topic type (from prior runs): "
+            + ", ".join(hints["common_gaps"])
+        )
 
     user_prompt = f"""Research question: {state['question']}
 Iteration: {state.get('iteration_count', 0) + 1} of {config.max_iterations}
@@ -95,7 +99,7 @@ Average source credibility: {avg_cred:.2f}
 Total results retrieved: {len(results)}
 
 Evidence:
-{evidence_text}"""
+{evidence_text}{memory_gap_hint}"""
 
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
