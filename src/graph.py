@@ -27,6 +27,7 @@ from src.agents.critic import critic_agent
 from src.agents.executor import search_executor_node
 from src.agents.intent import intent_agent
 from src.agents.planner import search_planner_agent
+from src.agents.retrieval_grader import retrieval_grader_node
 from src.agents.synthesis import synthesis_agent
 from src.agents.verifier import verifier_node
 from src.config import MAX_ITERATIONS, SOFT_LIMIT
@@ -198,16 +199,17 @@ def build_graph(checkpointer=None):
     graph = StateGraph(AgentState)
 
     # ── Nodes ─────────────────────────────────────────────────────────────────
-    graph.add_node("intent",      intent_agent)
-    graph.add_node("search_plan", search_planner_agent)
-    graph.add_node("search_exec", search_executor_node)
-    graph.add_node("tick",        increment_iteration)         # Counter node
-    graph.add_node("critic",      critic_agent)
-    graph.add_node("draft",       synthesis_agent)
-    graph.add_node("verify",      verifier_node)
-    graph.add_node("approve",     approve_node)
-    graph.add_node("publish",     publish_node)
-    graph.add_node("escalate",    escalation_node)
+    graph.add_node("intent",            intent_agent)
+    graph.add_node("search_plan",       search_planner_agent)
+    graph.add_node("search_exec",       search_executor_node)
+    graph.add_node("retrieval_grade",   retrieval_grader_node)  # CRAG
+    graph.add_node("tick",              increment_iteration)         # Counter node
+    graph.add_node("critic",            critic_agent)
+    graph.add_node("draft",             synthesis_agent)
+    graph.add_node("verify",            verifier_node)
+    graph.add_node("approve",           approve_node)
+    graph.add_node("publish",           publish_node)
+    graph.add_node("escalate",          escalation_node)
 
     # Abort helper nodes (set abort_reason before routing to escalate)
     graph.add_node("abort_budget", set_abort_reason_budget)
@@ -229,10 +231,11 @@ def build_graph(checkpointer=None):
     graph.add_conditional_edges(
         "search_exec",
         route_after_search,
-        {"ok": "tick", "fallback": "tick", "abort": "abort_search"},
+        {"ok": "retrieval_grade", "fallback": "retrieval_grade", "abort": "abort_search"},
     )
     graph.add_edge("abort_search", "escalate")
 
+    graph.add_edge("retrieval_grade", "tick")
     graph.add_edge("tick", "critic")
 
     graph.add_conditional_edges(

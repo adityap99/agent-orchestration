@@ -55,6 +55,9 @@ def search_executor_node(state: AgentState) -> dict[str, Any]:
     # ── Layer 2: pre-fill from semantic cache ─────────────────────────────────
     cached_results = _fetch_cached_sources(sorted_queries, plan.max_results_per_query)
 
+    # Per-query result lists for RRF merging
+    per_query_results: list[list[SearchResult]] = []
+
     async def run_all() -> None:
         nonlocal used_fallback
         for sq in sorted_queries:
@@ -67,6 +70,7 @@ def search_executor_node(state: AgentState) -> dict[str, Any]:
                 if is_fb:
                     used_fallback = True
                 new_results.extend(results)
+                per_query_results.append(results)
             except SearchUnavailableError as exc:
                 new_errors.append({
                     "node":    "search_exec",
@@ -83,13 +87,15 @@ def search_executor_node(state: AgentState) -> dict[str, Any]:
 
     asyncio.run(run_all())
 
-    # Merge cached + fresh results (cached appear first, deduplicated by URL at critic)
-    all_results = cached_results + new_results
+    # ── Reciprocal Rank Fusion (RRF) ─────────────────────────────────────────
+    # Merge per-query ranked lists into a single de-duped, re-ranked list.
+    # cached_results prepended so they participate in RRF scoring too.
+    all_results = _rrf_merge([cached_results] + per_query_results) if per_query_results else cached_results
 
     # Build summary message for critic context
     summary_parts = [
         f"Search complete: {len(new_results)} live results + {len(cached_results)} cached, "
-        f"from {len(sorted_queries)} queries."
+        f"from {len(sorted_queries)} queries (RRF-merged → {len(all_results)} unique)."
     ]
     if used_fallback:
         summary_parts.append("Note: used fallback search provider for some queries.")
@@ -135,3 +141,33 @@ def _fetch_cached_sources(sorted_queries: list, max_per_query: int) -> list[Sear
         return cached
     except Exception:
         return []
+
+
+def _rrf_merge(
+    per_query_lists: list[list[SearchResult]],
+    k: int = 60,
+) -> list[SearchResult]:
+    """
+    Reciprocal Rank Fusion (RRF) — merge multiple ranked result lists.
+
+    For each document d that appears in any list at rank r:
+        score(d) += 1 / (k + r + 1)
+
+    Documents appearing in multiple query result lists are boosted.
+    Among duplicate URLs, the highest-credibility copy is kept.
+
+    k=60 is the standard constant from Cormack et al. (2009).
+    """
+    rrf_scores: dict[str, float]       = {}
+    best:       dict[str, SearchResult] = {}
+
+    for ranked_list in per_query_lists:
+        for rank, result in enumerate(ranked_list):
+            url = result.url
+            rrf_scores[url] = rrf_scores.get(url, 0.0) + 1.0 / (k + rank + 1)
+            # Keep highest-credibility copy for rendering
+            if url not in best or result.credibility_score > best[url].credibility_score:
+                best[url] = result
+
+    sorted_urls = sorted(rrf_scores, key=lambda u: rrf_scores[u], reverse=True)
+    return [best[u] for u in sorted_urls]

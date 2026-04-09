@@ -139,3 +139,6 @@ class AgentState(TypedDict):
     # ── MEMORY (populated at run start; read-only inside nodes) ──────────────
     memory_hints:  Optional[dict]  # procedural + semantic hints for planner/critic
     user_profile:  Optional[dict]  # loaded user preference profile
+
+    # ── AGENTIC RAG ───────────────────────────────────────────────────────────
+    retrieval_grades: Optional[list]  # per-URL relevance grades from CRAG grader node

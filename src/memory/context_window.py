@@ -23,6 +23,20 @@ def _field(r: Any, key: str, default: Any = "") -> Any:
     return getattr(r, key, default)
 
 
+def _grade_map(state: dict) -> dict[str, float]:
+    """
+    Build URL → relevance_score map from CRAG retrieval_grades.
+    Score: yes=1.0, partial=0.5, no=0.0.
+    Returns empty dict when grades are absent (falls back to credibility-only ranking).
+    """
+    grades = state.get("retrieval_grades") or []
+    return {
+        g["url"]: float(g.get("score", 0.5))
+        for g in grades
+        if isinstance(g, dict) and g.get("url")
+    }
+
+
 class ContextWindowManager:
     """Pure-Python context packaging — no storage, no I/O."""
 
@@ -36,6 +50,8 @@ class ContextWindowManager:
         """
         results = state.get("search_results", [])
 
+        grades = _grade_map(state)
+
         seen: dict[str, tuple[Any, float]] = {}
         for r in results:
             url  = _field(r, "url", "")
@@ -43,12 +59,27 @@ class ContextWindowManager:
             if url not in seen or cred > seen[url][1]:
                 seen[url] = (r, cred)
 
-        top = sorted(seen.values(), key=lambda x: x[1], reverse=True)[:max_results]
+        def _sort_key(item: tuple[Any, float]) -> float:
+            r, cred = item
+            url     = _field(r, "url", "")
+            # Combine credibility with CRAG relevance grade.
+            # When grades absent (empty dict), weight defaults to 1.0 (no change).
+            grade_weight = grades.get(url, 1.0) if grades else 1.0
+            return cred * grade_weight
+
+        top = sorted(seen.values(), key=_sort_key, reverse=True)[:max_results]
 
         chunks: list[str] = []
         for i, (r, _) in enumerate(top, 1):
+            url        = _field(r, "url")
+            grade_tag  = ""
+            if grades:
+                rel = {1.0: "✓ relevant", 0.5: "~ partial", 0.0: "✗ irrelevant"}.get(
+                    grades.get(url, 0.5), "~ partial"
+                )
+                grade_tag = f" [{rel}]"
             chunks.append(
-                f"[{i}] URL: {_field(r, 'url')}\n"
+                f"[{i}] URL: {url}{grade_tag}\n"
                 f"    Credibility: {float(_field(r, 'credibility_score', 0.5)):.2f}\n"
                 f"    Query: {_field(r, 'query')}\n"
                 f"    Content: {str(_field(r, 'content'))[:500]}\n"
@@ -64,6 +95,8 @@ class ContextWindowManager:
         """
         results = state.get("search_results", [])
 
+        grades = _grade_map(state)
+
         seen: dict[str, tuple[Any, float]] = {}
         for r in results:
             url  = _field(r, "url", "")
@@ -71,7 +104,13 @@ class ContextWindowManager:
             if url not in seen or cred > seen[url][1]:
                 seen[url] = (r, cred)
 
-        top = sorted(seen.values(), key=lambda x: x[1], reverse=True)[:max_results]
+        def _sort_key(item: tuple[Any, float]) -> float:
+            r, cred = item
+            url     = _field(r, "url", "")
+            grade_weight = grades.get(url, 1.0) if grades else 1.0
+            return cred * grade_weight
+
+        top = sorted(seen.values(), key=_sort_key, reverse=True)[:max_results]
 
         parts: list[str] = []
         for i, (r, _) in enumerate(top, 1):

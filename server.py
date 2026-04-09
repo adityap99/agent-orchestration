@@ -160,6 +160,18 @@ def _emit_node_events(rs: RunState, node_name: str, update: dict) -> None:
         payload = evals[-1] if evals else {"confidence": update.get("confidence", 0.0)}
         emit("critic_complete", payload)
 
+    elif node_name == "retrieval_grade":
+        grades = update.get("retrieval_grades", [])
+        n_yes     = sum(1 for g in grades if isinstance(g, dict) and g.get("relevance") == "yes")
+        n_partial = sum(1 for g in grades if isinstance(g, dict) and g.get("relevance") == "partial")
+        n_no      = sum(1 for g in grades if isinstance(g, dict) and g.get("relevance") == "no")
+        emit("retrieval_graded", {
+            "total":   len(grades),
+            "yes":     n_yes,
+            "partial": n_partial,
+            "no":      n_no,
+        })
+
     elif node_name == "draft":
         report = update.get("report")
         if report:
@@ -422,6 +434,7 @@ async def start_research(req: StartResearchRequest):
         "openrouter_key":  req.openrouter_key,
         "memory_hints":    None,
         "user_profile":    _load_user_profile(req.user_id),
+        "retrieval_grades": None,
     }
 
     rs = RunState(

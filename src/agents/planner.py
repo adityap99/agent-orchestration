@@ -29,13 +29,24 @@ You will receive:
   - The topic and disambiguation from the intent agent
   - A history of already-executed queries (DO NOT repeat them or produce near-duplicates)
   - Feedback from the critic agent (if this is a refinement iteration)
+  - CRAG signal: if the previous retrieval grader flagged many irrelevant results, use
+    more specific queries this iteration
+
+STEP 1 — DECOMPOSE the research question into 2–4 atomic sub-questions.
+  Each sub-question should be independently answerable and cover a distinct aspect.
+  Example: "How has the EU AI Act affected foundation model providers?"
+    Sub-Q1: What does the EU AI Act require of foundation model providers?
+    Sub-Q2: How have OpenAI, Anthropic, Google responded to EU AI Act obligations?
+    Sub-Q3: What are the compliance timelines and business cost estimates?
+
+STEP 2 — Generate 1–2 targeted search queries per sub-question.
 
 Your output MUST be a JSON object matching this schema — no markdown, no explanation:
 {
   "queries": [
     {
       "query": "<the exact search string to use>",
-      "rationale": "<why this query will help answer the question>",
+      "rationale": "<which sub-question this targets and why>",
       "priority": <integer 1–5, where 5=highest priority>
     }
   ],
@@ -43,12 +54,11 @@ Your output MUST be a JSON object matching this schema — no markdown, no expla
 }
 
 RULES:
-1. Generate 2–5 queries. More is not better — targeted queries outperform broad ones.
+1. Generate 2–5 queries total (not more — targeted beats broad).
 2. Each query must be MEANINGFULLY different from all prior queries. Do not rephrase.
-3. Vary query types: some factual, some for recent developments, some for expert analysis.
-4. Higher priority queries should be more directly relevant to the core question.
-5. If the critic provided specific areas to investigate, generate queries targeting those gaps.
-6. Prefer authoritative sources: target government, academic, or institutional content.
+3. If the CRAG grader reported mostly irrelevant results, generate narrower, more specific queries.
+4. Prefer authoritative sources: target government, academic, or institutional content.
+5. If the critic provided specific gaps, generate queries targeting those gaps directly.
 
 BAD (near-duplicate): 'fusion energy research' → 'fusion energy studies' → 'research on fusion'
 GOOD: 'ITER fusion reactor progress 2025' → 'private fusion companies funding 2025' → 'nuclear fusion plasma confinement breakthrough'"""
@@ -88,7 +98,7 @@ Iteration: {state.get('iteration_count', 0) + 1}
 
 Already-executed queries (DO NOT repeat or rephrase these):
 {chr(10).join(f'  - {q}' for q in executed_queries) if executed_queries else '  (none yet — this is the first iteration)'}
-{critic_feedback}{_memory_hints_text(state)}
+{critic_feedback}{_crag_signal(state)}{_memory_hints_text(state)}
 
 Generate the next set of search queries."""
 
@@ -159,5 +169,32 @@ def _memory_hints_text(state: dict) -> str:
             lines.append("\nCommon knowledge gaps in past runs on this topic:")
             lines.extend(f"  - {g}" for g in hints["common_gaps"])
         return "\n".join(lines)
+    except Exception:
+        return ""
+
+
+def _crag_signal(state: dict) -> str:
+    """
+    Build a corrective RAG signal from the retrieval grader's last output.
+    Returns a prompt injection when most docs were irrelevant, so the planner
+    knows to narrow/change its query strategy.
+    """
+    try:
+        grades = state.get("retrieval_grades") or []
+        if not grades:
+            return ""
+        n_yes     = sum(1 for g in grades if g.get("relevance") == "yes")
+        n_partial = sum(1 for g in grades if g.get("relevance") == "partial")
+        n_total   = len(grades)
+        if n_total == 0:
+            return ""
+        ratio = (n_yes + 0.5 * n_partial) / n_total
+        if ratio < 0.4:
+            return (
+                f"\n\n⚠️  CRAG SIGNAL: {n_total - n_yes - n_partial} of {n_total} "
+                "retrieved docs were irrelevant to the question. Use more specific, "
+                "narrower queries this iteration."
+            )
+        return ""
     except Exception:
         return ""
